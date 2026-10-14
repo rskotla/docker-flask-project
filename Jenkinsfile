@@ -202,7 +202,7 @@ for result in report.get("Results", []):
         )
         rows.append("<tr>" + cells + "</tr>")
 
-table_rows = "\n".join(rows)
+table_rows = "\\n".join(rows)
 
 if not table_rows:
     table_rows = (
