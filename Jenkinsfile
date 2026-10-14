@@ -1,4 +1,3 @@
-
 pipeline {
     agent any
 
@@ -9,13 +8,21 @@ pipeline {
     }
 
     environment {
-        DEPLOY_HOST    = '192.168.1.32'
-        DEPLOY_USER    = 'deploy'
-        APP_DIR        = '/opt/flask-app'
-        IMAGE_NAME     = 'flask-demo'
-        CONTAINER_NAME = 'flask-demo'
-        APP_PORT       = '8080'
-        CONTAINER_PORT = '5000'
+        DEPLOY_HOST     = '192.168.1.32'
+        DEPLOY_USER     = 'deploy'
+        APP_DIR         = '/opt/flask-app'
+        
+        // Replace 'your-dockerhub-username' with your actual Docker Hub username
+        DOCKERHUB_USER  = 'your-dockerhub-username'
+        IMAGE_NAME      = 'flask-demo'
+        DOCKERHUB_REPO  = "${DOCKERHUB_USER}/${IMAGE_NAME}"
+        
+        // Loads Username and Password into DOCKERHUB_CREDS_USR and DOCKERHUB_CREDS_PSW
+        DOCKERHUB_CREDS = credentials('docker-hub-creds')
+        
+        CONTAINER_NAME  = 'flask-demo'
+        APP_PORT        = '8080'
+        CONTAINER_PORT  = '5000'
     }
 
     stages {
@@ -94,12 +101,35 @@ pipeline {
                             cd ${APP_DIR}
 
                             docker build \
-                                -t ${IMAGE_NAME}:${BUILD_NUMBER} .
+                                -t ${DOCKERHUB_REPO}:${BUILD_NUMBER} \
+                                -t ${DOCKERHUB_REPO}:latest .
 
                             docker image inspect \
-                                ${IMAGE_NAME}:${BUILD_NUMBER} >/dev/null
+                                ${DOCKERHUB_REPO}:${BUILD_NUMBER} >/dev/null
 
                             echo 'Docker image built successfully.'
+                        "
+                    '''
+                }
+            }
+        }
+
+        stage('Push to Docker Hub') {
+            steps {
+                sshagent(credentials: ['docker-server-ssh']) {
+                    // Pass the password via stdin to avoid exposing it in remote process lists
+                    sh '''
+                        set -eu
+
+                        echo "${DOCKERHUB_CREDS_PSW}" | ssh ${DEPLOY_USER}@${DEPLOY_HOST} "
+                            set -eu
+                            docker login -u ${DOCKERHUB_CREDS_USR} --password-stdin
+                            
+                            docker push ${DOCKERHUB_REPO}:${BUILD_NUMBER}
+                            docker push ${DOCKERHUB_REPO}:latest
+                            
+                            docker logout
+                            echo 'Docker image pushed to Docker Hub successfully.'
                         "
                     '''
                 }
@@ -124,7 +154,7 @@ pipeline {
                                 --name ${CONTAINER_NAME} \
                                 --restart unless-stopped \
                                 -p ${APP_PORT}:${CONTAINER_PORT} \
-                                ${IMAGE_NAME}:${BUILD_NUMBER}
+                                ${DOCKERHUB_REPO}:${BUILD_NUMBER}
 
                             docker ps --filter \
                                 name=^/${CONTAINER_NAME}$
