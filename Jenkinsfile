@@ -1,3 +1,4 @@
+```groovy
 pipeline {
     agent any
 
@@ -8,53 +9,42 @@ pipeline {
     }
 
     environment {
-        DEPLOY_HOST  = '192.168.1.32'
-        DEPLOY_USER  = 'deploy'
-        APP_DIR      = '/opt/flask-app'
+        DEPLOY_HOST = '192.168.1.32'
+        DEPLOY_USER = 'deploy'
+        APP_DIR = '/opt/flask-app'
 
         DOCKERHUB_REPO = 'rohitkotla/flask-demo'
         CONTAINER_NAME = 'flask-demo'
-        APP_PORT       = '8080'
+        APP_PORT = '8080'
         CONTAINER_PORT = '5000'
-
-        SSH_CREDENTIALS = 'docker-server-ssh'
-        DOCKERHUB_CREDENTIALS = 'docker-hub-creds'
     }
 
     stages {
 
-        // 1. Checkout and validate project files
         stage('Checkout') {
             steps {
                 checkout scm
 
                 sh '''
                     set -eu
-
                     test -f app.py
                     test -f Dockerfile
                     test -f requirements.txt
                     test -f requirements-ci.txt
                     test -d templates
                     test -d tests
-
                     echo "Project files validated."
                 '''
             }
         }
 
-        // 2. Prepare Python environment on Jenkins agent
         stage('Setup CI Environment') {
             steps {
                 sh '''
                     set -eu
-
                     python3 --version
                     python3 -m venv .venv-ci
-
-                    .venv-ci/bin/python -m pip install \
-                        --upgrade pip
-
+                    .venv-ci/bin/python -m pip install --upgrade pip
                     .venv-ci/bin/python -m pip install \
                         -r requirements.txt \
                         -r requirements-ci.txt
@@ -62,7 +52,6 @@ pipeline {
             }
         }
 
-        // 3. Run application tests
         stage('Unit Tests') {
             steps {
                 sh '''
@@ -72,7 +61,6 @@ pipeline {
             }
         }
 
-        // 4. Check code quality
         stage('Code Quality') {
             steps {
                 sh '''
@@ -82,7 +70,6 @@ pipeline {
             }
         }
 
-        // 5. Audit runtime Python dependencies
         stage('Dependency Security Audit') {
             steps {
                 sh '''
@@ -92,13 +79,11 @@ pipeline {
             }
         }
 
-        // 6. Validate remote Docker and Trivy
         stage('Validate Deployment Server') {
             steps {
                 sshagent(credentials: ['docker-server-ssh']) {
                     sh '''
                         set -eu
-
                         ssh -o BatchMode=yes \
                             -o StrictHostKeyChecking=yes \
                             "${DEPLOY_USER}@${DEPLOY_HOST}" \
@@ -110,13 +95,11 @@ pipeline {
             }
         }
 
-        // 7. Prepare remote application directory
         stage('Prepare Remote Directory') {
             steps {
                 sshagent(credentials: ['docker-server-ssh']) {
                     sh '''
                         set -eu
-
                         ssh "${DEPLOY_USER}@${DEPLOY_HOST}" \
                             "mkdir -p '${APP_DIR}'"
                     '''
@@ -124,7 +107,6 @@ pipeline {
             }
         }
 
-        // 8. Copy application files to Docker server
         stage('Copy Application Files') {
             steps {
                 sshagent(credentials: ['docker-server-ssh']) {
@@ -141,7 +123,6 @@ pipeline {
             }
         }
 
-        // 9. Build a uniquely tagged image on the remote server
         stage('Build Docker Image') {
             steps {
                 sshagent(credentials: ['docker-server-ssh']) {
@@ -158,7 +139,8 @@ pipeline {
             }
         }
 
-        // 10. Generate a full HIGH/CRITICAL Trivy report
+        // Generate Trivy JSON report on the Docker server
+        // and copy it to the Jenkins workspace.
         stage('Trivy Vulnerability Report') {
             steps {
                 sshagent(credentials: ['docker-server-ssh']) {
@@ -176,24 +158,168 @@ pipeline {
                              --output '/tmp/${REPORT}' \
                              '${IMAGE}'"
 
-                        scp "${DEPLOY_USER}@${DEPLOY_HOST}:/tmp/${REPORT}" \
-                            "${REPORT}"
+                        scp "${DEPLOY_USER}@${DEPLOY_HOST}:/tmp/${REPORT}" .
                     '''
                 }
-            }
 
-            post {
-                always {
-                    archiveArtifacts(
-                        artifacts: 'trivy-report-*.json',
-                        allowEmptyArchive: true,
-                        fingerprint: true
-                    )
-                }
+                // Convert JSON to a browser-friendly HTML report.
+                sh '''
+                    set -eu
+
+                    python3 - <<'PY'
+import html
+import json
+import os
+from pathlib import Path
+
+build = os.environ["BUILD_NUMBER"]
+json_file = Path(f"trivy-report-{build}.json")
+report = json.loads(json_file.read_text())
+
+counts = {"CRITICAL": 0, "HIGH": 0}
+rows = []
+
+for result in report.get("Results", []):
+    for vuln in result.get("Vulnerabilities") or []:
+        severity = vuln.get("Severity", "UNKNOWN")
+
+        if severity not in counts:
+            continue
+
+        counts[severity] += 1
+
+        values = [
+            severity,
+            vuln.get("VulnerabilityID", ""),
+            vuln.get("PkgName", ""),
+            vuln.get("InstalledVersion", ""),
+            vuln.get("FixedVersion") or "Not listed",
+            vuln.get("Title") or vuln.get("Description") or "",
+        ]
+
+        cells = "".join(
+            "<td>" + html.escape(str(value)) + "</td>"
+            for value in values
+        )
+        rows.append("<tr>" + cells + "</tr>")
+
+table_rows = "\n".join(rows)
+
+if not table_rows:
+    table_rows = (
+        '<tr><td colspan="6">'
+        'No HIGH or CRITICAL findings reported.'
+        '</td></tr>'
+    )
+
+page = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trivy Security Report</title>
+<style>
+body {
+  font-family: Arial, sans-serif;
+  margin: 28px;
+  color: #202938;
+}
+h1 { margin-bottom: 6px; }
+.cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin: 22px 0;
+}
+.card {
+  padding: 18px;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  min-width: 130px;
+}
+.num { font-size: 28px; font-weight: bold; }
+table { border-collapse: collapse; width: 100%; }
+th, td {
+  border: 1px solid #ddd;
+  padding: 10px;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+th { background: #f2f4f7; }
+tr:nth-child(even) { background: #fafafa; }
+.note { color: #555; }
+</style>
+</head>
+<body>
+<h1>Trivy Security Report</h1>
+<p>Jenkins build #BUILD_NUMBER</p>
+
+<div class="cards">
+  <div class="card">
+    HIGH
+    <div class="num">HIGH_COUNT</div>
+  </div>
+  <div class="card">
+    CRITICAL
+    <div class="num">CRITICAL_COUNT</div>
+  </div>
+</div>
+
+<p class="note">
+  Findings are package-level entries. "Not listed" means
+  Trivy did not provide a fixed version.
+</p>
+
+<table>
+<thead>
+<tr>
+  <th>Severity</th>
+  <th>CVE</th>
+  <th>Package</th>
+  <th>Installed version</th>
+  <th>Fixed version</th>
+  <th>Details</th>
+</tr>
+</thead>
+<tbody>
+TABLE_ROWS
+</tbody>
+</table>
+</body>
+</html>
+"""
+
+page = (
+    page.replace("BUILD_NUMBER", html.escape(build))
+        .replace("HIGH_COUNT", str(counts["HIGH"]))
+        .replace("CRITICAL_COUNT", str(counts["CRITICAL"]))
+        .replace("TABLE_ROWS", table_rows)
+)
+
+Path("trivy-report.html").write_text(page)
+print("HTML report generated: trivy-report.html")
+print("HIGH findings:", counts["HIGH"])
+print("CRITICAL findings:", counts["CRITICAL"])
+PY
+                '''
+
+                // Publish a clickable HTML report on the Jenkins job page.
+                publishHTML(target: [
+                    reportName: 'Trivy Security Report',
+                    reportDir: '.',
+                    reportFiles: 'trivy-report.html',
+                    keepAll: true,
+                    alwaysLinkToLastBuild: true,
+                    allowMissing: false
+                ])
+
+                archiveArtifacts(
+                    artifacts: 'trivy-report-*.json,trivy-report.html',
+                    fingerprint: true
+                )
             }
         }
 
-        // 11. Fail if fixable HIGH/CRITICAL vulnerabilities exist
         stage('Trivy Security Gate') {
             steps {
                 sshagent(credentials: ['docker-server-ssh']) {
@@ -216,7 +342,6 @@ pipeline {
             }
         }
 
-        // 12. Push image only after all previous checks pass
         stage('Push to Docker Hub') {
             steps {
                 sshagent(credentials: ['docker-server-ssh']) {
@@ -244,7 +369,6 @@ pipeline {
             }
         }
 
-        // 13. Deploy the exact image that passed the scans
         stage('Deploy Application') {
             steps {
                 sshagent(credentials: ['docker-server-ssh']) {
@@ -267,7 +391,6 @@ pipeline {
             }
         }
 
-        // 14. Verify application health on the Docker server
         stage('Health Check') {
             steps {
                 sshagent(credentials: ['docker-server-ssh']) {
@@ -310,7 +433,6 @@ pipeline {
             echo """
                 CI/CD pipeline failed.
                 Check the failed stage and Jenkins console output.
-                The deployment may not have completed successfully.
             """
         }
 
@@ -319,3 +441,4 @@ pipeline {
         }
     }
 }
+```
