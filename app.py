@@ -1,6 +1,7 @@
 
+from datetime import UTC, datetime
+
 from flask import Flask, jsonify, render_template
-from datetime import datetime, timezone
 
 app = Flask(__name__)
 
@@ -25,7 +26,7 @@ def application_info():
         "version": "1.0.0",
         "environment": "Docker Lab",
         "message": "Application is running successfully!",
-        "timestamp": datetime.now(timezone.utc).isoformat()
+        "timestamp": datetime.now(UTC).isoformat()
     }), 200
 
 
