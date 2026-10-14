@@ -200,7 +200,7 @@ for result in report.get("Results", []):
             "<td>" + html.escape(str(value)) + "</td>"
             for value in values
         )
-        rows.append("<tr>" + cells + "</tr>")
+        rows.append('<tr class="severity-' + severity.lower() + '">' + cells + "</tr>")
 
 table_rows = "\\n".join(rows)
 
@@ -211,79 +211,234 @@ if not table_rows:
         '</td></tr>'
     )
 
+unique_cves = {
+    vuln.get("VulnerabilityID")
+    for result in report.get("Results", [])
+    for vuln in (result.get("Vulnerabilities") or [])
+    if vuln.get("VulnerabilityID")
+    and vuln.get("Severity") in counts
+}
+
 page = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Trivy Security Report</title>
+<title>Trivy Security Dashboard</title>
 <style>
-body {
-  font-family: Arial, sans-serif;
-  margin: 28px;
-  color: #202938;
+:root {
+  color-scheme: dark;
+  --bg: #0b1120;
+  --panel: #131c2e;
+  --panel2: #18243a;
+  --line: #293750;
+  --text: #edf3ff;
+  --muted: #9eacc4;
+  --red: #ff6577;
+  --amber: #ffbd69;
+  --green: #5ee0ad;
+  --blue: #7db8ff;
 }
-h1 { margin-bottom: 6px; }
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.55 Inter, ui-sans-serif, system-ui, -apple-system,
+        BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+.container { max-width: 1500px; margin: auto; padding: 32px 24px 48px; }
+.hero {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 20px; flex-wrap: wrap; margin-bottom: 28px;
+}
+.eyebrow {
+  color: var(--blue); font-size: 11px; font-weight: 800;
+  letter-spacing: 2px; text-transform: uppercase;
+}
+h1 { margin: 7px 0; font-size: clamp(25px, 4vw, 36px); letter-spacing: -1px; }
+.subtitle { color: var(--muted); }
+.status {
+  border: 1px solid #68402e; background: #30241e;
+  color: var(--amber); border-radius: 999px; padding: 9px 14px;
+  font-weight: 700;
+}
 .cards {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
-  margin: 22px 0;
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 15px; margin-bottom: 25px;
 }
 .card {
-  padding: 18px;
-  border: 1px solid #ddd;
-  border-radius: 8px;
-  min-width: 130px;
+  background: linear-gradient(145deg, var(--panel2), var(--panel));
+  border: 1px solid var(--line); border-radius: 16px;
+  padding: 20px; min-width: 0;
 }
-.num { font-size: 28px; font-weight: bold; }
-table { border-collapse: collapse; width: 100%; }
-th, td {
-  border: 1px solid #ddd;
-  padding: 10px;
-  text-align: left;
-  overflow-wrap: anywhere;
+.card-label {
+  color: var(--muted); text-transform: uppercase;
+  letter-spacing: 1px; font-size: 11px; font-weight: 800;
 }
-th { background: #f2f4f7; }
-tr:nth-child(even) { background: #fafafa; }
-.note { color: #555; }
+.number { font-size: 35px; font-weight: 800; line-height: 1.25; margin: 9px 0; }
+.card-hint { color: var(--muted); font-size: 12px; }
+.high .number { color: var(--red); }
+.critical .number { color: var(--amber); }
+.unique .number { color: var(--blue); }
+.total .number { color: var(--green); }
+.panel {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 16px; overflow: hidden;
+}
+.panel-head {
+  padding: 22px; display: flex; align-items: center;
+  justify-content: space-between; gap: 14px; flex-wrap: wrap;
+  border-bottom: 1px solid var(--line);
+}
+h2 { margin: 0; font-size: 18px; }
+.panel-subtitle { color: var(--muted); margin-top: 4px; font-size: 12px; }
+.controls { display: flex; flex-wrap: wrap; gap: 10px; }
+input, select {
+  background: #0b1323; color: var(--text); border: 1px solid #34435d;
+  border-radius: 9px; padding: 11px 13px; font: inherit; min-height: 42px;
+}
+input { width: min(300px, 70vw); }
+input::placeholder { color: #8493ad; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: separate; border-spacing: 0; }
+th {
+  position: sticky; top: 0; z-index: 1; background: #1b2940;
+  color: #b9c7df; text-align: left; text-transform: uppercase;
+  letter-spacing: .7px; font-size: 10px; white-space: nowrap;
+}
+th, td { padding: 14px 16px; border-bottom: 1px solid var(--line); }
+td { color: #dce6f7; vertical-align: top; overflow-wrap: anywhere; }
+tbody tr:hover { background: #1b2940; }
+tbody tr:last-child td { border-bottom: 0; }
+td:nth-child(2) { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; white-space: nowrap; }
+td:nth-child(3), td:nth-child(4), td:nth-child(5) { white-space: nowrap; }
+.severity-high td:first-child::before,
+.severity-critical td:first-child::before {
+  display: inline-block; padding: 4px 9px; border-radius: 6px;
+  font-size: 10px; font-weight: 900; letter-spacing: .5px;
+}
+.severity-high td:first-child::before {
+  content: "HIGH"; background: #48212d; color: #ff9aaa;
+}
+.severity-critical td:first-child::before {
+  content: "CRITICAL"; background: #49321e; color: #ffd09a;
+}
+.severity-high td:first-child, .severity-critical td:first-child {
+  font-size: 0;
+}
+td:nth-child(5) { color: var(--amber); }
+.empty { padding: 35px; text-align: center; color: var(--muted); }
+.footer {
+  color: var(--muted); font-size: 12px; margin-top: 18px;
+  display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+}
+@media (max-width: 850px) {
+  .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .container { padding: 22px 14px 35px; }
+}
+@media (max-width: 480px) {
+  .cards { grid-template-columns: 1fr 1fr; gap: 9px; }
+  .card { padding: 14px; }
+  .number { font-size: 28px; }
+  .panel-head { padding: 16px; }
+}
 </style>
 </head>
 <body>
-<h1>Trivy Security Report</h1>
-<p>Jenkins build #BUILD_NUMBER</p>
+<main class="container">
+  <header class="hero">
+    <div>
+      <div class="eyebrow">Application Security / Container Scan</div>
+      <h1>Trivy Security Dashboard</h1>
+      <div class="subtitle">Docker image vulnerability assessment · Jenkins build #BUILD_NUMBER</div>
+    </div>
+    <div class="status">● SCAN SUMMARY</div>
+  </header>
 
-<div class="cards">
-  <div class="card">
-    HIGH
-    <div class="num">HIGH_COUNT</div>
+  <section class="cards">
+    <article class="card high">
+      <div class="card-label">High severity</div>
+      <div class="number">HIGH_COUNT</div>
+      <div class="card-hint">Findings requiring review</div>
+    </article>
+    <article class="card critical">
+      <div class="card-label">Critical severity</div>
+      <div class="number">CRITICAL_COUNT</div>
+      <div class="card-hint">Highest-priority findings</div>
+    </article>
+    <article class="card unique">
+      <div class="card-label">Unique CVEs</div>
+      <div class="number">UNIQUE_COUNT</div>
+      <div class="card-hint">Distinct vulnerability IDs</div>
+    </article>
+    <article class="card total">
+      <div class="card-label">Package findings</div>
+      <div class="number">TOTAL_COUNT</div>
+      <div class="card-hint">Affected package entries</div>
+    </article>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <div>
+        <h2>Vulnerability findings</h2>
+        <div class="panel-subtitle">Search CVEs, packages, versions or descriptions</div>
+      </div>
+      <div class="controls">
+        <input id="search" type="search" placeholder="Search findings..." aria-label="Search findings">
+        <select id="severity" aria-label="Filter by severity">
+          <option value="all">All severities</option>
+          <option value="high">High</option>
+          <option value="critical">Critical</option>
+        </select>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Severity</th><th>CVE</th><th>Package</th>
+            <th>Installed version</th><th>Fixed version</th><th>Description</th>
+          </tr>
+        </thead>
+        <tbody id="findings">TABLE_ROWS</tbody>
+      </table>
+      <div id="empty" class="empty" hidden>No findings match your search.</div>
+    </div>
+  </section>
+
+  <div class="footer">
+    <span>Generated by Trivy · Jenkins build #BUILD_NUMBER</span>
+    <span>“Not listed” means Trivy did not provide a fixed version.</span>
   </div>
-  <div class="card">
-    CRITICAL
-    <div class="num">CRITICAL_COUNT</div>
-  </div>
-</div>
+</main>
+<script>
+const search = document.getElementById("search");
+const severity = document.getElementById("severity");
+const table = document.getElementById("findings");
+const empty = document.getElementById("empty");
 
-<p class="note">
-  Findings are package-level entries. "Not listed" means
-  Trivy did not provide a fixed version.
-</p>
+function filterRows() {
+  const query = search.value.toLowerCase().trim();
+  const level = severity.value;
+  let visible = 0;
 
-<table>
-<thead>
-<tr>
-  <th>Severity</th>
-  <th>CVE</th>
-  <th>Package</th>
-  <th>Installed version</th>
-  <th>Fixed version</th>
-  <th>Details</th>
-</tr>
-</thead>
-<tbody>
-TABLE_ROWS
-</tbody>
-</table>
+  for (const row of table.rows) {
+    const matchesText = row.innerText.toLowerCase().includes(query);
+    const matchesSeverity = level === "all" || row.classList.contains("severity-" + level);
+    const show = matchesText && matchesSeverity;
+    row.hidden = !show;
+    if (show) visible++;
+  }
+
+  empty.hidden = visible !== 0;
+  table.hidden = visible === 0;
+}
+search.addEventListener("input", filterRows);
+severity.addEventListener("change", filterRows);
+filterRows();
+</script>
 </body>
 </html>
 """
@@ -292,10 +447,13 @@ page = (
     page.replace("BUILD_NUMBER", html.escape(build))
         .replace("HIGH_COUNT", str(counts["HIGH"]))
         .replace("CRITICAL_COUNT", str(counts["CRITICAL"]))
+        .replace("UNIQUE_COUNT", str(len(unique_cves)))
+        .replace("TOTAL_COUNT", str(sum(counts.values())))
         .replace("TABLE_ROWS", table_rows)
 )
 
 Path("trivy-report.html").write_text(page)
+
 print("HTML report generated: trivy-report.html")
 print("HIGH findings:", counts["HIGH"])
 print("CRITICAL findings:", counts["CRITICAL"])
