@@ -13,7 +13,7 @@ pipeline {
         APP_DIR         = '/opt/flask-app'
         
         // Replace 'your-dockerhub-username' with your actual Docker Hub username
-        DOCKERHUB_USER  = 'your-dockerhub-username'
+        DOCKERHUB_USER  = 'rohitkotla'
         IMAGE_NAME      = 'flask-demo'
         DOCKERHUB_REPO  = "${DOCKERHUB_USER}/${IMAGE_NAME}"
         
