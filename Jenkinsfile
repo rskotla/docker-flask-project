@@ -8,193 +8,289 @@ pipeline {
     }
 
     environment {
-        DEPLOY_HOST     = '192.168.1.32'
-        DEPLOY_USER     = 'deploy'
-        APP_DIR         = '/opt/flask-app'
-        
-        // Replace 'your-dockerhub-username' with your actual Docker Hub username
-        DOCKERHUB_USER  = 'rohitkotla'
-        IMAGE_NAME      = 'flask-demo'
-        DOCKERHUB_REPO  = "${DOCKERHUB_USER}/${IMAGE_NAME}"
-        
-        // Loads Username and Password into DOCKERHUB_CREDS_USR and DOCKERHUB_CREDS_PSW
-        DOCKERHUB_CREDS = credentials('docker-hub-creds')
-        
-        CONTAINER_NAME  = 'flask-demo'
-        APP_PORT        = '8080'
-        CONTAINER_PORT  = '5000'
+        DEPLOY_HOST  = '192.168.1.32'
+        DEPLOY_USER  = 'deploy'
+        APP_DIR      = '/opt/flask-app'
+
+        DOCKERHUB_REPO = 'rohitkotla/flask-demo'
+        CONTAINER_NAME = 'flask-demo'
+        APP_PORT       = '8080'
+        CONTAINER_PORT = '5000'
+
+        SSH_CREDENTIALS = 'docker-server-ssh'
+        DOCKERHUB_CREDENTIALS = 'docker-hub-creds'
     }
 
     stages {
 
+        // 1. Checkout and validate project files
         stage('Checkout') {
             steps {
                 checkout scm
 
                 sh '''
                     set -eu
+
                     test -f app.py
                     test -f Dockerfile
                     test -f requirements.txt
+                    test -f requirements-ci.txt
                     test -d templates
+                    test -d tests
 
-                    echo "Application files verified."
+                    echo "Project files validated."
                 '''
             }
         }
 
-        stage('Validate SSH and Docker') {
+        // 2. Prepare Python environment on Jenkins agent
+        stage('Setup CI Environment') {
+            steps {
+                sh '''
+                    set -eu
+
+                    python3 --version
+                    python3 -m venv .venv-ci
+
+                    .venv-ci/bin/python -m pip install \
+                        --upgrade pip
+
+                    .venv-ci/bin/python -m pip install \
+                        -r requirements.txt \
+                        -r requirements-ci.txt
+                '''
+            }
+        }
+
+        // 3. Run application tests
+        stage('Unit Tests') {
+            steps {
+                sh '''
+                    set -eu
+                    .venv-ci/bin/python -m pytest -q
+                '''
+            }
+        }
+
+        // 4. Check code quality
+        stage('Code Quality') {
+            steps {
+                sh '''
+                    set -eu
+                    .venv-ci/bin/ruff check app.py tests/
+                '''
+            }
+        }
+
+        // 5. Audit runtime Python dependencies
+        stage('Dependency Security Audit') {
+            steps {
+                sh '''
+                    set -eu
+                    .venv-ci/bin/pip-audit -r requirements.txt
+                '''
+            }
+        }
+
+        // 6. Validate remote Docker and Trivy
+        stage('Validate Deployment Server') {
             steps {
                 sshagent(credentials: ['docker-server-ssh']) {
                     sh '''
                         set -eu
 
-                        ssh -o StrictHostKeyChecking=accept-new \
-                            ${DEPLOY_USER}@${DEPLOY_HOST} '
-                                set -eu
-                                docker --version
-                                docker info >/dev/null
-                                echo "SSH and Docker are ready."
-                            '
+                        ssh -o BatchMode=yes \
+                            -o StrictHostKeyChecking=yes \
+                            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+                            "docker --version &&
+                             trivy --version &&
+                             docker info >/dev/null"
                     '''
                 }
             }
         }
 
+        // 7. Prepare remote application directory
         stage('Prepare Remote Directory') {
             steps {
                 sshagent(credentials: ['docker-server-ssh']) {
                     sh '''
                         set -eu
 
-                        ssh ${DEPLOY_USER}@${DEPLOY_HOST} \
-                            "mkdir -p ${APP_DIR}"
+                        ssh "${DEPLOY_USER}@${DEPLOY_HOST}" \
+                            "mkdir -p '${APP_DIR}'"
                     '''
                 }
             }
         }
 
-        stage('Copy Application') {
+        // 8. Copy application files to Docker server
+        stage('Copy Application Files') {
             steps {
                 sshagent(credentials: ['docker-server-ssh']) {
                     sh '''
                         set -eu
 
                         scp app.py Dockerfile requirements.txt \
-                            ${DEPLOY_USER}@${DEPLOY_HOST}:${APP_DIR}/
+                            "${DEPLOY_USER}@${DEPLOY_HOST}:${APP_DIR}/"
 
                         scp -r templates \
-                            ${DEPLOY_USER}@${DEPLOY_HOST}:${APP_DIR}/
+                            "${DEPLOY_USER}@${DEPLOY_HOST}:${APP_DIR}/"
                     '''
                 }
             }
         }
 
+        // 9. Build a uniquely tagged image on the remote server
         stage('Build Docker Image') {
             steps {
                 sshagent(credentials: ['docker-server-ssh']) {
                     sh '''
                         set -eu
 
-                        ssh ${DEPLOY_USER}@${DEPLOY_HOST} "
-                            set -eu
-                            cd ${APP_DIR}
-
-                            docker build \
-                                -t ${DOCKERHUB_REPO}:${BUILD_NUMBER} \
-                                -t ${DOCKERHUB_REPO}:latest .
-
-                            docker image inspect \
-                                ${DOCKERHUB_REPO}:${BUILD_NUMBER} >/dev/null
-
-                            echo 'Docker image built successfully.'
-                        "
+                        ssh "${DEPLOY_USER}@${DEPLOY_HOST}" \
+                            "cd '${APP_DIR}' &&
+                             docker build --pull \
+                               -t '${DOCKERHUB_REPO}:${BUILD_NUMBER}' \
+                               -t '${DOCKERHUB_REPO}:latest' ."
                     '''
                 }
             }
         }
 
+        // 10. Generate a full HIGH/CRITICAL Trivy report
+        stage('Trivy Vulnerability Report') {
+            steps {
+                sshagent(credentials: ['docker-server-ssh']) {
+                    sh '''
+                        set -eu
+
+                        IMAGE="${DOCKERHUB_REPO}:${BUILD_NUMBER}"
+                        REPORT="trivy-report-${BUILD_NUMBER}.json"
+
+                        ssh "${DEPLOY_USER}@${DEPLOY_HOST}" \
+                            "trivy image \
+                             --scanners vuln \
+                             --severity HIGH,CRITICAL \
+                             --format json \
+                             --output '/tmp/${REPORT}' \
+                             '${IMAGE}'"
+
+                        scp "${DEPLOY_USER}@${DEPLOY_HOST}:/tmp/${REPORT}" \
+                            "${REPORT}"
+                    '''
+                }
+            }
+
+            post {
+                always {
+                    archiveArtifacts(
+                        artifacts: 'trivy-report-*.json',
+                        allowEmptyArchive: true,
+                        fingerprint: true
+                    )
+                }
+            }
+        }
+
+        // 11. Fail if fixable HIGH/CRITICAL vulnerabilities exist
+        stage('Trivy Security Gate') {
+            steps {
+                sshagent(credentials: ['docker-server-ssh']) {
+                    sh '''
+                        set -eu
+
+                        IMAGE="${DOCKERHUB_REPO}:${BUILD_NUMBER}"
+
+                        ssh "${DEPLOY_USER}@${DEPLOY_HOST}" \
+                            "trivy image \
+                             --scanners vuln \
+                             --ignore-unfixed \
+                             --severity HIGH,CRITICAL \
+                             --exit-code 1 \
+                             '${IMAGE}'"
+
+                        echo "Trivy security gate passed."
+                    '''
+                }
+            }
+        }
+
+        // 12. Push image only after all previous checks pass
         stage('Push to Docker Hub') {
             steps {
                 sshagent(credentials: ['docker-server-ssh']) {
-                    // Pass the password via stdin to avoid exposing it in remote process lists
-                    sh '''
-                        set -eu
-
-                        echo "${DOCKERHUB_CREDS_PSW}" | ssh ${DEPLOY_USER}@${DEPLOY_HOST} "
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: 'docker-hub-creds',
+                            usernameVariable: 'DH_USER',
+                            passwordVariable: 'DH_PASS'
+                        )
+                    ]) {
+                        sh '''
                             set -eu
-                            docker login -u ${DOCKERHUB_CREDS_USR} --password-stdin
-                            
-                            docker push ${DOCKERHUB_REPO}:${BUILD_NUMBER}
-                            docker push ${DOCKERHUB_REPO}:latest
-                            
-                            docker logout
-                            echo 'Docker image pushed to Docker Hub successfully.'
-                        "
-                    '''
+
+                            printf '%s' "$DH_PASS" |
+                                ssh "${DEPLOY_USER}@${DEPLOY_HOST}" \
+                                "docker login \
+                                 --username '${DH_USER}' \
+                                 --password-stdin &&
+                                 docker push '${DOCKERHUB_REPO}:${BUILD_NUMBER}' &&
+                                 docker push '${DOCKERHUB_REPO}:latest' &&
+                                 docker logout"
+                        '''
+                    }
                 }
             }
         }
 
-        stage('Deploy Container') {
+        // 13. Deploy the exact image that passed the scans
+        stage('Deploy Application') {
             steps {
                 sshagent(credentials: ['docker-server-ssh']) {
                     sh '''
                         set -eu
 
-                        ssh ${DEPLOY_USER}@${DEPLOY_HOST} "
-                            set -eu
+                        IMAGE="${DOCKERHUB_REPO}:${BUILD_NUMBER}"
 
-                            if docker container inspect \
-                                ${CONTAINER_NAME} >/dev/null 2>&1; then
-                                docker rm -f ${CONTAINER_NAME}
-                            fi
+                        ssh "${DEPLOY_USER}@${DEPLOY_HOST}" \
+                            "docker rm -f '${CONTAINER_NAME}' 2>/dev/null || true"
 
-                            docker run -d \
-                                --name ${CONTAINER_NAME} \
-                                --restart unless-stopped \
-                                -p ${APP_PORT}:${CONTAINER_PORT} \
-                                ${DOCKERHUB_REPO}:${BUILD_NUMBER}
-
-                            docker ps --filter \
-                                name=^/${CONTAINER_NAME}$
-
-                            echo 'Container deployed successfully.'
-                        "
+                        ssh "${DEPLOY_USER}@${DEPLOY_HOST}" \
+                            "docker run -d \
+                             --name '${CONTAINER_NAME}' \
+                             --restart unless-stopped \
+                             -p '${APP_PORT}:${CONTAINER_PORT}' \
+                             '${IMAGE}'"
                     '''
                 }
             }
         }
 
+        // 14. Verify application health on the Docker server
         stage('Health Check') {
             steps {
                 sshagent(credentials: ['docker-server-ssh']) {
                     sh '''
                         set -eu
 
-                        ssh ${DEPLOY_USER}@${DEPLOY_HOST} \
-                            "APP_PORT=${APP_PORT} CONTAINER_NAME=${CONTAINER_NAME} bash -s" <<'REMOTE_SCRIPT'
-set -eu
+                        ssh "${DEPLOY_USER}@${DEPLOY_HOST}" '
+                            for i in $(seq 1 12); do
+                                if curl -fsS \
+                                    http://127.0.0.1:8080/health; then
+                                    echo
+                                    echo "Health check passed."
+                                    exit 0
+                                fi
 
-attempt=1
-max_attempts=12
+                                echo "Waiting for application... attempt $i/12"
+                                sleep 5
+                            done
 
-while [ "$attempt" -le "$max_attempts" ]; do
-    if curl -fsS "http://localhost:${APP_PORT}/health"; then
-        echo
-        echo "Health check successful."
-        exit 0
-    fi
-
-    echo "Attempt $attempt failed; retrying..."
-    attempt=$((attempt + 1))
-    sleep 5
-done
-
-echo "Health check failed."
-docker logs --tail 100 "$CONTAINER_NAME"
-exit 1
-REMOTE_SCRIPT
+                            echo "Health check failed."
+                            docker logs --tail 100 flask-demo
+                            exit 1
+                        '
                     '''
                 }
             }
@@ -203,16 +299,23 @@ REMOTE_SCRIPT
 
     post {
         success {
-            echo 'Flask deployment successful.'
-            echo 'Application URL: http://192.168.1.32:8080'
+            echo """
+                CI/CD pipeline completed successfully.
+                Image: ${DOCKERHUB_REPO}:${BUILD_NUMBER}
+                Application: http://${DEPLOY_HOST}:${APP_PORT}
+            """
         }
 
         failure {
-            echo 'Pipeline failed. Check the failed stage in Console Output.'
+            echo """
+                CI/CD pipeline failed.
+                Check the failed stage and Jenkins console output.
+                The deployment may not have completed successfully.
+            """
         }
 
         always {
-            echo 'Jenkins pipeline execution completed.'
+            echo 'Pipeline execution finished.'
         }
     }
 }
